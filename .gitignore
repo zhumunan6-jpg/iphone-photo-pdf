@@ -1,0 +1,8 @@
+node_modules/
+output/
+tmp/
+test-results/
+.env
+.env.*
+.sites-runtime/
+*.local

@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "照片成册 · 照片转 PDF",
+  "short_name": "照片成册",
+  "description": "从相册选择照片，在本地合成 PDF 并保存到文件。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#f5f7fb",
+  "icons": [
+    {"src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"}
+  ]
+}

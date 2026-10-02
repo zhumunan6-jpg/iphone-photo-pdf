@@ -1,0 +1,11 @@
+{
+  "name": "iphone-photo-pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "将 iPhone 相册照片在本地合成为 PDF 的离线网页应用",
+  "scripts": {
+    "dev": "node scripts/server.mjs",
+    "test": "node scripts/test.mjs",
+    "check": "node --check public/app.js && node --check public/sw.js"
+  }
+}
