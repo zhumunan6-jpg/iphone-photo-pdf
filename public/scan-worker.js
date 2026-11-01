@@ -1,5 +1,5 @@
 'use strict';
-importScripts('./scan.js');
+importScripts('./scan.js?v=1.2.0');
 self.onmessage = ({ data }) => {
   try {
     const pixels = new Uint8ClampedArray(data.buffer);

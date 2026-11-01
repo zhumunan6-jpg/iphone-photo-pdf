@@ -142,7 +142,7 @@
   function runScan(pixels, width, height, strength) {
     return new Promise((resolve, reject) => {
       let worker;
-      try { worker = new Worker('./scan-worker.js'); }
+      try { worker = new Worker('./scan-worker.js?v=1.2.0'); }
       catch { reject(new Error('无法启动扫描，请重新打开页面后重试')); return; }
       const fail = (error) => {
         clearTimeout(timer);

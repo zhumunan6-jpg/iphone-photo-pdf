@@ -49,12 +49,24 @@
     paperPercentile(gray, first, width, height, radius, false);
     paperPercentile(first, second, width, height, radius, true);
 
-    // A real white plateau prevents a gray paper veil. The continuous ink curve
-    // preserves faint strokes instead of making a black/white cutoff decision.
-    const whiteFloor = Math.max(2, 4.5 - 4 * strength);
-    const inkScale = 15 - 7 * strength;
+    // Estimate the weak background tail separately from dark ink. A fixed tiny
+    // cutoff magnifies paper grain and reverse-side writing on real notebooks.
+    // Clean synthetic/flat paper keeps the sensitive curve for very faint ink.
+    const histogram = new Uint32Array(40);
+    let weakCount = 0;
+    for (let i = 0; i < size; i++) {
+      const contrast = Math.round(Math.max(0, second[i] - gray[i]) * 255 / Math.max(32, second[i]));
+      if (contrast < histogram.length) { histogram[contrast]++; weakCount++; }
+    }
+    let noise = 0, accumulated = 0;
+    const rank = Math.ceil(weakCount * .95);
+    while (noise < histogram.length - 1 && accumulated + histogram[noise] < rank) accumulated += histogram[noise++];
+    if (noise <= 3 || !weakCount) noise = 0;
+    const whiteFloor = Math.max(2, 4.5 - 4 * strength, noise * (3.8 - 2.65 * strength));
+    const inkScale = 15 - 7 * strength + noise * .8;
+    const exponent = noise ? 2 : 1;
     const tone = new Uint8Array(4097);
-    for (let i = 0; i < tone.length; i++) tone[i] = Math.round(255 * Math.exp(-Math.max(0, i / 16 - whiteFloor) / inkScale));
+    for (let i = 0; i < tone.length; i++) tone[i] = Math.round(255 * Math.exp(-Math.pow(Math.max(0, i / 16 - whiteFloor) / inkScale, exponent)));
     for (let i = 0, p = 0; i < size; i++, p += 4) {
       const darkness = Math.max(0, second[i] - gray[i]) * 255 / Math.max(32, second[i]);
       const value = tone[Math.min(4096, Math.round(darkness * 16))];

@@ -1,8 +1,8 @@
 'use strict';
 // Cache only app assets. Photo/PDF blob URLs never enter the service worker cache.
 const PREFIX = `photo-pdf-${self.registration.scope}-`;
-const CACHE = `${PREFIX}v2`;
-const ASSETS = ['./', './index.html', './styles.css?v=1.1.0', './app.js?v=1.1.0', './scan.js', './scan-worker.js', './vendor/pdf-lib.min.js', './icon.svg', './manifest.webmanifest', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'];
+const CACHE = `${PREFIX}v3`;
+const ASSETS = ['./', './index.html', './styles.css?v=1.2.0', './app.js?v=1.2.0', './scan.js?v=1.2.0', './scan-worker.js?v=1.2.0', './vendor/pdf-lib.min.js', './icon.svg', './manifest.webmanifest', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'];
 // Let the new page finish loading before it requests activation. Never reload
 // open pages: their selected photos and unsaved PDFs must remain intact.
 self.addEventListener('install', (event) => { event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS))); });

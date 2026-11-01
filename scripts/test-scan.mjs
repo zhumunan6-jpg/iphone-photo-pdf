@@ -65,4 +65,31 @@ for (const [w, h] of [[1, 1], [1, 9], [9, 1], [3, 5]]) {
   const enhanced = enhance(image, w, h);
   assert.ok(enhanced.every((value) => value === 255), 'Uniform paper and very small images must become white');
 }
+// A noisy notebook must not inherit the ultra-sensitive clean-paper cutoff.
+// The dark continuous pencil and separated dashes must keep their geometry.
+const nw = 640, nh = 800;
+const notebook = new Uint8ClampedArray(nw * nh * 4);
+for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
+  const grain = ((x * 1237 + y * 1811 + (x * y) % 131) % 13) - 6;
+  const ghost = x > 300 && x < 500 && y > 100 && y < 300 && (x % 24 < 3 || y % 32 < 3) ? 6 : 0;
+  const solid = y === 420 && x >= 80 && x < 560;
+  const dash = y === 490 && x >= 80 && x < 560 && (x - 80) % 32 < 18;
+  const value = 220 + grain - ghost - (solid || dash ? 60 : 0);
+  const p = (y * nw + x) * 4;
+  notebook[p] = notebook[p + 1] = notebook[p + 2] = value; notebook[p + 3] = 255;
+}
+const cleaned = enhance(notebook, nw, nh);
+let notebookPaper = 0, notebookWhite = 0;
+for (let y = 30; y < nh - 30; y++) for (let x = 30; x < nw - 30; x++) {
+  if (y === 420 || y === 490) continue;
+  notebookPaper++; if (cleaned[(y * nw + x) * 4] === 255) notebookWhite++;
+}
+assert.ok(notebookWhite / notebookPaper > .995, 'Paper grain and weak reverse writing must be suppressed');
+for (let x = 80; x < 560; x++) {
+  assert.ok(cleaned[(420 * nw + x) * 4] < 128, 'The solid line must not break');
+  const value = cleaned[(490 * nw + x) * 4];
+  if ((x - 80) % 32 < 18) assert.ok(value < 128, 'Every dash must survive');
+  else assert.equal(value, 255, 'Dash gaps must stay white and must not be bridged');
+}
+console.log('PASS: noisy paper and reverse writing suppressed; solid line continuous; all dash segments and exact gaps preserved');
 console.log(`PASS: scan algorithm; ${(100 * white / paper).toFixed(2)}% white paper; one-pixel line retention ${retention.map((line) => `${(line.visible * 100).toFixed(1)}%`).join('/')}; diagonal, tiny dot, gray pencil, dark ink, strength, small images`);
