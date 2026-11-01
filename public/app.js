@@ -6,6 +6,12 @@
   let busy = false;
   let generated = null;
   let nextId = 0;
+  let scanEnabled = false;
+  let scanStrength = 55;
+  let scanDirty = false;
+  let detailPhoto = null;
+  let detailMode = 'original';
+  let detailVersion = 0;
   const icons = {
     earlier: '<path d="m15 18-6-6 6-6"/>',
     later: '<path d="m9 18 6-6-6-6"/>',
@@ -23,10 +29,10 @@
   function setBusy(value, label = '') {
     busy = value;
     document.body.classList.toggle('busy', value);
-    for (const id of ['choose', 'add-more', 'clear', 'photo-input', 'filename', 'page-size', 'save']) $(id).disabled = value;
+    for (const id of ['choose', 'add-more', 'clear', 'photo-input', 'filename', 'page-size', 'save', 'scan-toggle', 'scan-strength', 'scan-apply']) $(id).disabled = value;
     $('progress-wrap').hidden = !value;
     $('generate-label').textContent = value ? label : (generated ? '重新生成 PDF' : '生成 PDF');
-    $('generate').disabled = value || !photos.length;
+    $('generate').disabled = value || !photos.length || scanDirty;
     $('generate').setAttribute('aria-busy', String(value));
   }
   function invalidate() {
@@ -47,10 +53,14 @@
       const number = document.createElement('span');
       number.className = 'page-number';
       number.textContent = String(index + 1).padStart(2, '0');
-      const preview = document.createElement('div');
+      const preview = document.createElement('button');
       preview.className = 'photo-preview';
+      preview.type = 'button';
+      preview.dataset.action = 'preview';
+      preview.setAttribute('aria-label', `第 ${index + 1} 页查看大图`);
+      preview.disabled = busy;
       const img = document.createElement('img');
-      img.src = photo.thumbnail;
+      img.src = scanEnabled && photo.scan ? photo.scan.thumbnail : photo.thumbnail;
       img.alt = `第 ${index + 1} 页：${photo.name}`;
       // Fit the rotated thumbnail inside its frame, including 90-degree turns.
       const turn = photo.rotation % 180 !== 0;
@@ -73,13 +83,24 @@
         actions.append(button);
       }
       card.append(number, preview, name, actions);
+      if (scanEnabled && photo.scan) {
+        const badge = document.createElement('span');
+        badge.className = 'scan-badge';
+        badge.textContent = '已扫描';
+        card.append(badge);
+      }
       list.append(card);
     });
     $('photos-section').hidden = !photos.length;
     $('choose').hidden = !!photos.length;
     $('count').textContent = String(photos.length);
-    $('bottom-summary').textContent = photos.length ? `${photos.length} 张照片 · ${photos.length} 页 PDF` : '先选照片，再生成 PDF';
-    $('generate').disabled = busy || !photos.length;
+    $('scan-toggle').disabled = busy || !photos.length;
+    $('scan-toggle').setAttribute('aria-pressed', String(scanEnabled));
+    $('scan-label').textContent = scanEnabled ? '已开启白底扫描 · 恢复原图' : '扫描 · 白底增强';
+    $('scan-settings').hidden = !scanEnabled;
+    $('scan-apply').hidden = !scanDirty;
+    $('bottom-summary').textContent = photos.length ? (scanDirty ? '扫描强度已调整，请先应用' : `${photos.length} 张照片 · ${photos.length} 页${scanEnabled ? '白底扫描 ' : ' '}PDF`) : '先选照片，再生成 PDF';
+    $('generate').disabled = busy || !photos.length || scanDirty;
   }
   function loadImage(blob) {
     return new Promise((resolve, reject) => {
@@ -90,8 +111,8 @@
       img.src = url;
     });
   }
-  function canvasBlob(canvas, quality) {
-    return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('照片转换失败')), 'image/jpeg', quality));
+  function canvasBlob(canvas, quality, type = 'image/jpeg') {
+    return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('照片转换失败')), type, quality));
   }
   async function preparePhoto(file) {
     const img = await loadImage(file);
@@ -116,7 +137,97 @@
     const thumbnail = URL.createObjectURL(await canvasBlob(thumb, .75));
     canvas.width = canvas.height = thumb.width = thumb.height = 1;
     img.src = '';
-    return { id: nextId++, name: file.name, bytes: new Uint8Array(await jpeg.arrayBuffer()), width, height, rotation: 0, thumbnail };
+    return { id: nextId++, name: file.name, source: file, bytes: new Uint8Array(await jpeg.arrayBuffer()), width, height, rotation: 0, thumbnail, scan: null };
+  }
+  function runScan(pixels, width, height, strength) {
+    return new Promise((resolve, reject) => {
+      let worker;
+      try { worker = new Worker('./scan-worker.js'); }
+      catch { reject(new Error('无法启动扫描，请重新打开页面后重试')); return; }
+      const fail = (error) => {
+        clearTimeout(timer);
+        worker.terminate();
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new Error('扫描超时，请减少照片数量后重试')), 90000);
+      worker.onerror = () => fail(new Error('扫描组件未加载或内存不足，请联网刷新后重试'));
+      worker.onmessage = ({ data }) => {
+        clearTimeout(timer);
+        worker.onmessage = worker.onerror = null;
+        // End each page's worker to release its full-resolution scratch buffers
+        // deterministically before processing the next page on iPhone.
+        worker.terminate();
+        if (data.error) { reject(new Error(data.error)); return; }
+        try { resolve(new ImageData(new Uint8ClampedArray(data.buffer), width, height)); }
+        catch (error) { reject(error); }
+      };
+      try { worker.postMessage({ buffer: pixels.data.buffer, width, height, strength }, [pixels.data.buffer]); }
+      catch (error) { fail(error); }
+    });
+  }
+  function scanScale(width, height) {
+    // Stay below older iPhone canvas limits while keeping roughly a 12 MP photo.
+    return Math.min(1, 4096 / Math.max(width, height), Math.sqrt(12000000 / (width * height)));
+  }
+  async function prepareScan(photo, strength) {
+    const img = await loadImage(photo.source);
+    const canvas = document.createElement('canvas');
+    const thumb = document.createElement('canvas');
+    try {
+      const scale = scanScale(img.naturalWidth, img.naturalHeight);
+      const width = canvas.width = Math.max(1, Math.floor(img.naturalWidth * scale));
+      const height = canvas.height = Math.max(1, Math.floor(img.naturalHeight * scale));
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('浏览器无法处理照片');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      img.src = '';
+      const pixels = ctx.getImageData(0, 0, width, height);
+      ctx.putImageData(await runScan(pixels, width, height, strength), 0, 0);
+      // PNG avoids turning the white paper gray or losing fine strokes to JPEG.
+      const bytes = new Uint8Array(await (await canvasBlob(canvas, undefined, 'image/png')).arrayBuffer());
+      const ratio = Math.min(1, 360 / Math.max(width, height));
+      thumb.width = Math.max(1, Math.round(width * ratio));
+      thumb.height = Math.max(1, Math.round(height * ratio));
+      thumb.getContext('2d').drawImage(canvas, 0, 0, thumb.width, thumb.height);
+      const thumbnail = URL.createObjectURL(await canvasBlob(thumb, undefined, 'image/png'));
+      return { bytes, width, height, strength, thumbnail };
+    } finally {
+      canvas.width = canvas.height = thumb.width = thumb.height = 1;
+      img.src = '';
+    }
+  }
+  async function applyScan(strength = Number($('scan-strength').value)) {
+    if (busy || !photos.length) return;
+    invalidate();
+    setBusy(true, '正在扫描照片…');
+    $('scan-label').textContent = '正在扫描…';
+    let complete = false;
+    try {
+      for (let i = 0; i < photos.length; i++) {
+        message(`正在白底扫描第 ${i + 1} / ${photos.length} 张，保留浅字与细线…`);
+        $('progress').value = Math.round(i / photos.length * 100);
+        await tick();
+        const photo = photos[i];
+        if (photo.scan?.strength === strength) continue;
+        const scan = await prepareScan(photo, strength);
+        if (photo.scan) URL.revokeObjectURL(photo.scan.thumbnail);
+        photo.scan = scan;
+      }
+      scanEnabled = true;
+      scanStrength = strength;
+      $('progress').value = 100;
+      complete = true;
+      message('白底扫描已完成。点照片放大检查浅字和细线，再生成 PDF。');
+    } catch (error) {
+      scanEnabled = false;
+      message(`扫描未完成，当前使用原图。${error.message || '请减少照片数量后重试。'}`, true);
+    } finally {
+      scanDirty = false;
+      setBusy(false);
+      render();
+    }
+    return complete;
   }
   async function addFiles(files) {
     if (busy || !files.length) return;
@@ -139,25 +250,33 @@
       render();
       $('photo-input').value = '';
     }
-    if (failed.length) message(`已添加 ${added} 张。以下 ${failed.length} 个文件无法读取，未加入 PDF：${failed.join('、')}。HEIC 照片请用 iOS 17 或更新版本的 Safari，或先转成 JPEG。`, true);
-    else message(`已添加 ${added} 张照片，可以调整顺序后生成 PDF。`);
+    const wasScanning = scanEnabled;
+    if (wasScanning && added) {
+      $('scan-strength').value = String(scanStrength);
+      $('scan-strength-value').value = String(scanStrength);
+      await applyScan(scanStrength);
+    }
+    if (failed.length) message(`已添加 ${added} 张。以下 ${failed.length} 个文件无法读取，未加入 PDF：${failed.join('、')}。HEIC 照片请用 iOS 17 或更新版本的 Safari，或先转成 JPEG。${wasScanning ? (scanEnabled ? '已添加的照片已应用白底扫描。' : '扫描未完成，当前使用原图。') : ''}`, true);
+    else if (!wasScanning) message(`已添加 ${added} 张照片，可以调整顺序后生成 PDF。`);
   }
   async function imageForPdf(photo) {
-    if (!photo.rotation) return { bytes: photo.bytes, width: photo.width, height: photo.height };
-    const img = await loadImage(new Blob([photo.bytes], { type: 'image/jpeg' }));
+    const source = scanEnabled && photo.scan ? photo.scan : photo;
+    const type = scanEnabled && photo.scan ? 'image/png' : 'image/jpeg';
+    if (!photo.rotation) return { bytes: source.bytes, width: source.width, height: source.height, type };
+    const img = await loadImage(new Blob([source.bytes], { type }));
     const canvas = document.createElement('canvas');
     const sideways = photo.rotation % 180 !== 0;
-    canvas.width = sideways ? photo.height : photo.width;
-    canvas.height = sideways ? photo.width : photo.height;
+    canvas.width = sideways ? source.height : source.width;
+    canvas.height = sideways ? source.width : source.height;
     const ctx = canvas.getContext('2d');
     ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.rotate(photo.rotation * Math.PI / 180);
-    ctx.drawImage(img, -photo.width / 2, -photo.height / 2);
-    const bytes = new Uint8Array(await (await canvasBlob(canvas, .92)).arrayBuffer());
+    ctx.drawImage(img, -source.width / 2, -source.height / 2);
+    const bytes = new Uint8Array(await (await canvasBlob(canvas, .92, type)).arrayBuffer());
     const width = canvas.width, height = canvas.height;
     canvas.width = canvas.height = 1;
     img.src = '';
-    return { bytes, width, height };
+    return { bytes, width, height, type };
   }
   function filename() {
     const clean = $('filename').value.replace(/\.pdf$/i, '').replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 80);
@@ -165,7 +284,7 @@
   }
   function formatBytes(size) { return size < 1024 * 1024 ? `${Math.max(1, Math.round(size / 1024))} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`; }
   async function generate() {
-    if (busy || !photos.length) return;
+    if (busy || !photos.length || scanDirty) return;
     if (!window.PDFLib) { message('PDF 组件未加载，请联网刷新后重试。', true); return; }
     invalidate();
     setBusy(true, '正在生成 PDF…');
@@ -179,7 +298,10 @@
         $('progress').value = Math.round(i / photos.length * 100);
         await tick();
         const photo = await imageForPdf(photos[i]);
-        const image = await pdf.embedJpg(photo.bytes);
+        const image = photo.type === 'image/png' ? await pdf.embedPng(photo.bytes) : await pdf.embedJpg(photo.bytes);
+        // pdf-lib releases the decoded PNG buffer after embedding. Do this per
+        // page instead of retaining every full-resolution raster until save().
+        await image.embed();
         let pageWidth, pageHeight;
         if ($('page-size').value === 'photo') {
           const ratio = 842 / Math.max(photo.width, photo.height);
@@ -196,7 +318,7 @@
       const url = URL.createObjectURL(file);
       generated = { file, url };
       $('result-name').textContent = file.name;
-      $('result-meta').textContent = `${photos.length} 页 · ${formatBytes(file.size)}`;
+      $('result-meta').textContent = `${photos.length} 页 · ${formatBytes(file.size)}${scanEnabled ? ' · 白底扫描' : ''}`;
       $('preview').href = $('download').href = url;
       $('download').download = file.name;
       const canShare = supportsFileShare(file);
@@ -228,6 +350,83 @@
       else message('未能打开分享菜单。请点“打开 PDF”，再通过浏览器分享菜单保存到“文件”，或点“下载 PDF”。', true);
     } finally { $('save').disabled = false; }
   }
+  async function renderDetail() {
+    if (!detailPhoto) return;
+    const version = ++detailVersion;
+    const photo = detailPhoto;
+    const scanned = detailMode === 'scan' && scanEnabled && photo.scan;
+    $('detail-original').setAttribute('aria-pressed', String(!scanned));
+    $('detail-scan').setAttribute('aria-pressed', String(!!scanned));
+    $('detail-scan').hidden = !scanEnabled || !photo.scan;
+    $('detail-status').textContent = '正在读取大图…';
+    $('detail-canvas').hidden = true;
+    let img;
+    try {
+      img = await loadImage(scanned ? new Blob([photo.scan.bytes], { type: 'image/png' }) : photo.source);
+      if (version !== detailVersion) return;
+      const scale = scanScale(img.naturalWidth, img.naturalHeight);
+      const width = Math.max(1, Math.floor(img.naturalWidth * scale));
+      const height = Math.max(1, Math.floor(img.naturalHeight * scale));
+      const canvas = $('detail-canvas');
+      const sideways = photo.rotation % 180 !== 0;
+      canvas.width = sideways ? height : width;
+      canvas.height = sideways ? width : height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('无法显示大图');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(photo.rotation * Math.PI / 180);
+      ctx.drawImage(img, -width / 2, -height / 2, width, height);
+      canvas.hidden = false;
+      canvas.setAttribute('aria-label', `${photo.name}，${scanned ? '白底扫描效果' : '原图'}`);
+      $('detail-status').textContent = scanned ? '白底扫描效果，与导出的页面使用同一张扫描图。' : '原始照片，便于对照浅字和细线。';
+    } catch {
+      if (version === detailVersion) $('detail-status').textContent = '大图读取失败，请关闭后重试。';
+    } finally { if (img) img.src = ''; }
+  }
+  function openDetail(photo) {
+    detailPhoto = photo;
+    detailMode = scanEnabled && photo.scan ? 'scan' : 'original';
+    $('detail-title').textContent = `第 ${photos.indexOf(photo) + 1} 页 · 照片对比`;
+    $('detail-viewport').classList.remove('zoomed');
+    $('detail-zoom').setAttribute('aria-pressed', 'false');
+    $('detail-zoom').textContent = '放大查看';
+    $('photo-dialog').showModal();
+    renderDetail();
+  }
+  function releasePhoto(photo) {
+    URL.revokeObjectURL(photo.thumbnail);
+    if (photo.scan) URL.revokeObjectURL(photo.scan.thumbnail);
+  }
+  $('detail-close').addEventListener('click', () => $('photo-dialog').close());
+  $('photo-dialog').addEventListener('close', () => {
+    detailVersion++;
+    detailPhoto = null;
+    $('detail-canvas').width = $('detail-canvas').height = 1;
+  });
+  for (const mode of ['original', 'scan']) $(`detail-${mode}`).addEventListener('click', () => { detailMode = mode; renderDetail(); });
+  $('detail-zoom').addEventListener('click', () => {
+    const zoomed = $('detail-viewport').classList.toggle('zoomed');
+    $('detail-zoom').setAttribute('aria-pressed', String(zoomed));
+    $('detail-zoom').textContent = zoomed ? '适应页面' : '放大查看';
+  });
+  $('scan-toggle').addEventListener('click', () => {
+    if (busy || !photos.length) return;
+    if (!scanEnabled) { applyScan(); return; }
+    scanEnabled = scanDirty = false;
+    photos.forEach((photo) => { if (photo.scan) URL.revokeObjectURL(photo.scan.thumbnail); photo.scan = null; });
+    $('scan-strength').value = String(scanStrength);
+    $('scan-strength-value').value = String(scanStrength);
+    invalidate(); render();
+    message('已恢复原图，可按原来的方式生成 PDF。');
+  });
+  $('scan-strength').addEventListener('input', () => {
+    if (busy || !scanEnabled) return;
+    $('scan-strength-value').value = $('scan-strength').value;
+    scanDirty = Number($('scan-strength').value) !== scanStrength;
+    invalidate(); render();
+  });
+  $('scan-apply').addEventListener('click', () => applyScan());
   for (const id of ['choose', 'add-more']) $(id).addEventListener('click', () => { if (!busy) $('photo-input').click(); });
   $('photo-input').addEventListener('change', (event) => addFiles(Array.from(event.target.files || [])));
   $('photo-list').addEventListener('click', (event) => {
@@ -238,11 +437,13 @@
     const index = photos.findIndex((p) => p.id === id);
     if (index < 0) return;
     const action = button.dataset.action;
+    if (action === 'preview') { openDetail(photos[index]); return; }
     invalidate();
-    if (action === 'remove') { URL.revokeObjectURL(photos[index].thumbnail); photos.splice(index, 1); }
+    if (action === 'remove') { releasePhoto(photos[index]); photos.splice(index, 1); }
     if (action === 'rotate') photos[index].rotation = (photos[index].rotation + 90) % 360;
     if (action === 'earlier' && index > 0) [photos[index - 1], photos[index]] = [photos[index], photos[index - 1]];
     if (action === 'later' && index < photos.length - 1) [photos[index + 1], photos[index]] = [photos[index], photos[index + 1]];
+    if (!photos.length) scanEnabled = scanDirty = false;
     render(); message('照片已更新，请生成 PDF。');
     const card = $('photo-list').querySelector(`[data-id="${id}"]`);
     const focusButton = card?.querySelector(`[data-action="${action}"]:not(:disabled)`) || card?.querySelector('button:not(:disabled)');
@@ -250,8 +451,9 @@
   });
   $('clear').addEventListener('click', () => {
     if (busy) return;
-    photos.forEach((p) => URL.revokeObjectURL(p.thumbnail));
-    photos.length = 0; invalidate(); render(); message('已清空，可重新选择照片。');
+    photos.forEach(releasePhoto);
+    photos.length = 0; scanEnabled = scanDirty = false;
+    invalidate(); render(); message('已清空，可重新选择照片。');
   });
   for (const id of ['filename', 'page-size']) $(id).addEventListener('input', () => { if (generated) { invalidate(); message('设置已更新，请重新生成 PDF。'); } });
   $('generate').addEventListener('click', generate);
@@ -264,19 +466,31 @@
   if (document.modelContext?.registerTool) {
     const lifecycle = new AbortController();
     const schema = { type: 'object', properties: {}, additionalProperties: false };
-    const readState = () => ({ photos: photos.length, busy, pdfReady: !!generated, pdfName: generated?.file.name || null });
+    const readState = () => ({ photos: photos.length, busy, pdfReady: !!generated, pdfName: generated?.file.name || null, scanEnabled, scanStrength, scanPending: scanDirty });
     const validate = (input) => {
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) throw new Error('Expected an empty object');
     };
     for (const tool of [
       { name: 'get_photo_pdf_state', title: '查看照片成册状态', description: 'Read the number of selected photos and whether a PDF has been generated. Does not expose photo content.', annotations: { readOnlyHint: true, untrustedContentHint: true }, execute(input) { validate(input); return readState(); } },
-      { name: 'generate_photo_pdf', title: '生成照片 PDF', description: 'Generate a PDF from the photos already selected by the user, using the visible filename and page settings. Does not save or share the PDF.', annotations: { readOnlyHint: false, untrustedContentHint: true }, async execute(input) { validate(input); if (busy || !photos.length) throw new Error('Select photos first and wait until processing finishes'); await generate(); if (!generated) throw new Error('PDF generation failed'); return readState(); } }
+      { name: 'generate_photo_pdf', title: '生成照片 PDF', description: 'Generate a PDF from the photos already selected by the user, using the visible filename, page settings, and applied scan effect. Does not save or share the PDF.', annotations: { readOnlyHint: false, untrustedContentHint: true }, async execute(input) { validate(input); if (busy || !photos.length || scanDirty) throw new Error('Select photos, apply pending scan settings, and wait until processing finishes'); await generate(); if (!generated) throw new Error('PDF generation failed'); return readState(); } }
     ]) {
       try { Promise.resolve(document.modelContext.registerTool({ ...tool, inputSchema: schema }, { signal: lifecycle.signal })).catch(() => {}); } catch { /* Browsers without this optional interface work normally. */ }
     }
     addEventListener('pagehide', () => lifecycle.abort(), { once: true });
   }
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('./sw.js').catch(() => { /* Online conversion remains available. */ });
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((registration) => {
+      const activateWhenLoaded = (worker) => {
+        if (!worker) return;
+        const activate = () => worker.postMessage({ type: 'ACTIVATE_UPDATE' });
+        if (document.readyState === 'complete') activate();
+        else addEventListener('load', activate, { once: true });
+      };
+      activateWhenLoaded(registration.waiting);
+      registration.addEventListener('updatefound', () => {
+        const worker = registration.installing;
+        worker?.addEventListener('statechange', () => { if (worker.state === 'installed') activateWhenLoaded(worker); });
+      });
+    }).catch(() => { /* Online conversion remains available. */ });
   }
 })();

@@ -12,9 +12,9 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=1.1.0">
   <script src="./vendor/pdf-lib.min.js" defer></script>
-  <script src="./app.js" defer></script>
+  <script src="./app.js?v=1.1.0" defer></script>
 </head>
 <body>
   <div class="shell">
@@ -35,6 +35,15 @@
       <section id="photos-section" class="photos-section" hidden aria-labelledby="photos-title">
         <div class="section-heading"><h3 id="photos-title">已选照片 <span id="count" class="count">0</span></h3><button id="clear" class="text-button" type="button">清空</button></div>
         <p class="section-hint">按页码顺序成册，可移动或旋转照片。</p>
+        <button id="scan-toggle" class="scan-toggle" type="button" aria-pressed="false" aria-controls="scan-settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4m8 0h4v4M4 16v4h4m8 0h4v-4M3 12h18M8 8h8M8 16h6"/></svg><span id="scan-label">扫描 · 白底增强</span></button>
+        <div id="scan-settings" class="scan-settings" hidden>
+          <p class="scan-description">纸张提白，字迹加深。浅铅笔和细线保留灰度。</p>
+          <div class="scan-strength-heading"><label for="scan-strength">笔迹保留</label><output id="scan-strength-value" for="scan-strength">55</output></div>
+          <input id="scan-strength" type="range" min="0" max="100" step="5" value="55" aria-describedby="scan-note">
+          <div class="scan-range-labels"><span>底色更干净</span><span>浅笔更清楚</span></div>
+          <p id="scan-note" class="setting-note">点照片可放大对比。调高会保留更多浅笔迹，也可能带出纸纹。</p>
+          <button id="scan-apply" class="add-more" type="button" hidden>应用新的扫描强度</button>
+        </div>
         <ol id="photo-list" class="photo-list"></ol>
         <button id="add-more" class="add-more" type="button">＋ 继续添加照片</button>
       </section>
@@ -59,11 +68,18 @@
       <div id="progress-wrap" class="progress-wrap" hidden><progress id="progress" max="100" value="0" aria-label="处理进度"></progress></div>
 
       <details class="help"><summary>如何添加到 iPhone 主屏幕？</summary><p>用 Safari 打开本页，点“分享”，选择“添加到主屏幕”。如果看到“作为网页 App 打开”，保持开启。</p><p>首次联网打开完成后，应用支持离线使用。照片仅在设备上处理；关闭或刷新页面会清空当前照片，请先保存 PDF。</p></details>
-      <footer>照片留在你的设备上。</footer>
+      <footer>照片留在你的设备上。<br><span id="app-version">v1.1 · 白底扫描</span></footer>
     </main>
   </div>
 
   <div class="bottom-bar"><div><span id="bottom-summary">先选照片，再生成 PDF</span><button id="generate" class="primary" type="button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg><span id="generate-label">生成 PDF</span></button></div></div>
+  <dialog id="photo-dialog" class="photo-dialog" aria-labelledby="detail-title">
+    <div class="detail-heading"><h2 id="detail-title">照片预览</h2><button id="detail-close" class="detail-button" type="button" autofocus>关闭</button></div>
+    <div class="detail-controls"><div class="detail-modes"><button id="detail-original" class="detail-button" type="button" aria-pressed="false">原图</button><button id="detail-scan" class="detail-button" type="button" aria-pressed="false">扫描效果</button></div><button id="detail-zoom" class="detail-button" type="button" aria-pressed="false">放大查看</button></div>
+    <p id="detail-status" class="setting-note" role="status"></p>
+    <div id="detail-viewport" class="detail-viewport"><canvas id="detail-canvas" width="1" height="1" role="img" aria-label="照片大图预览"></canvas></div>
+    <p class="setting-note">放大后可滑动查看，重点检查浅字和细线。</p>
+  </dialog>
   <noscript><p class="noscript">请启用浏览器 JavaScript 后使用照片转 PDF。</p></noscript>
 </body>
 </html>
